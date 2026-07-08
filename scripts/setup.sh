@@ -222,21 +222,64 @@ retry_until 60 5 'oc apply -f prerequisites/ca-issuer.yaml 2>/dev/null' || {
 wait_for_resource clusterissuer/default-ca condition=Ready 300
 
 # Apply keycloak prerequisites and wait for it to be ready
-KEYCLOAK_NS=""
-if oc get deployment keycloak-service -n keycloak &>/dev/null; then
-    KEYCLOAK_NS="keycloak"
-elif oc get deployment keycloak-service -n openshift-operators &>/dev/null; then
-    KEYCLOAK_NS="openshift-operators"
-fi
-
-if [[ -n "${KEYCLOAK_NS}" ]]; then
-    echo "Keycloak is already installed in ${KEYCLOAK_NS}, skipping..."
+KEYCLOAK_NS="keycloak"
+if oc get keycloak osac-keycloak -n keycloak &>/dev/null; then
+    echo "Keycloak is already installed, skipping..."
 else
-    KEYCLOAK_NS="keycloak"
     wait_for_namespace_cleanup keycloak
-    oc apply -k prerequisites/keycloak/
+
+    # 1. Install Keycloak operator via OLM
+    echo "Installing Keycloak operator..."
+    retry_until 300 3 '[[ -n "$(oc get csv --no-headers -n keycloak | grep keycloak)" ]]' 'oc apply -f prerequisites/keycloak/operator.yaml || true' || {
+        echo "Timed out waiting for Keycloak CSV to exist"
+        exit 1
+    }
+    KC_CSV=$(oc get csv --no-headers -n keycloak | awk '/keycloak/ { print $1 }' | tail -1)
+    wait_for_resource clusterserviceversion/${KC_CSV} jsonpath='{.status.phase}'=Succeeded 300 keycloak
+
+    # 2. Deploy database
+    echo "Deploying Keycloak database..."
+    oc apply -k prerequisites/keycloak/database/
+    retry_until 300 5 '[[ "$(oc get statefulset keycloak-database -n keycloak -o jsonpath='"'"'{.status.readyReplicas}'"'"' 2>/dev/null)" == "1" ]]' || {
+        echo "Timed out waiting for Keycloak database to be ready"
+        exit 1
+    }
+
+    # 3. Create DB credentials secret for Keycloak CR
+    DB_PASSWORD=$(oc get secret keycloak-database-password -n keycloak -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+    oc create secret generic keycloak-db-credentials -n keycloak \
+        --from-literal=username=keycloak \
+        --from-literal=password="${DB_PASSWORD}" \
+        --dry-run=client -o yaml | oc apply -f -
+
+    # 4. Deploy Keycloak instance (Certificate + CR + Route)
+    echo "Deploying Keycloak instance..."
+    oc apply -f prerequisites/keycloak/keycloak-instance.yaml
+
+    # 5. Import OSAC realm via KeycloakRealmImport CR
+    echo "Importing OSAC realm..."
+    jq -n --arg realm "$(cat prerequisites/keycloak/files/realm.json)" '{
+        apiVersion: "k8s.keycloak.org/v2beta1",
+        kind: "KeycloakRealmImport",
+        metadata: {name: "osac-realm-import", namespace: "keycloak"},
+        spec: {keycloakCRName: "osac-keycloak", realm: ($realm | fromjson)}
+    }' | oc apply -f -
+
+    # 6. Wait for Keycloak CR to be ready
+    echo "Waiting for Keycloak to be ready..."
+    retry_until 600 10 '[[ "$(oc get keycloak osac-keycloak -n keycloak -o jsonpath='"'"'{.status.conditions[?(@.type=="Ready")].status}'"'"' 2>/dev/null)" == "True" ]]' || {
+        echo "Timed out waiting for Keycloak to be ready"
+        exit 1
+    }
+
+    # 7. Wait for realm import and set up test user passwords
+    echo "Waiting for realm import..."
+    retry_until 300 5 '[[ "$(oc get keycloakrealmimport osac-realm-import -n keycloak -o jsonpath='"'"'{.status.conditions[?(@.type=="Done")].status}'"'"' 2>/dev/null)" == "True" ]]' || {
+        echo "Timed out waiting for realm import"
+        exit 1
+    }
+    oc apply -f prerequisites/keycloak/password-setup-job.yaml -n keycloak
 fi
-wait_for_resource deployment/keycloak-service condition=Available 600 ${KEYCLOAK_NS}
 
 # Apply AAP prerequisites and wait for it to be ready
 AAP_NS=""
@@ -283,7 +326,7 @@ if [[ "${DEPLOY_MODE}" == "helm" ]]; then
     retry_until 120 3 'oc get configmap ca-bundle -n '"${INSTALLER_NAMESPACE}"' -o jsonpath='"'"'{.data.bundle\.pem}'"'"' 2>/dev/null | grep -q "BEGIN CERTIFICATE"'
 
     # Create controller OAuth credentials from the Keycloak realm config.
-    FC_CLIENT_SECRET=$(jq -er '.clients[] | select(.clientId == "osac-controller") | .secret // empty' prerequisites/keycloak/service/files/realm.json)
+    FC_CLIENT_SECRET=$(jq -er '.clients[] | select(.clientId == "osac-controller") | .secret // empty' prerequisites/keycloak/files/realm.json)
     [[ -n "${FC_CLIENT_SECRET}" ]] || { echo "ERROR: Could not resolve secret for osac-controller in realm.json" >&2; exit 1; }
     oc create secret generic fulfillment-controller-credentials \
         --from-literal=client-id=osac-controller \
@@ -373,7 +416,7 @@ else
     "${SCRIPT_DIR}/ensure-ca-bundle.sh" "${INSTALLER_NAMESPACE}"
 
     # Create controller OAuth credentials from the Keycloak realm config
-    FC_CLIENT_SECRET=$(jq -er '.clients[] | select(.clientId == "osac-controller") | .secret // empty' prerequisites/keycloak/service/files/realm.json)
+    FC_CLIENT_SECRET=$(jq -er '.clients[] | select(.clientId == "osac-controller") | .secret // empty' prerequisites/keycloak/files/realm.json)
     [[ -n "${FC_CLIENT_SECRET}" ]] || { echo "ERROR: Could not resolve secret for osac-controller in realm.json" >&2; exit 1; }
     oc create secret generic fulfillment-controller-credentials \
         --from-literal=client-id=osac-controller \
