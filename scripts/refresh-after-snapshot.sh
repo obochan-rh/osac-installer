@@ -14,7 +14,7 @@ INSTALLER_VM_TEMPLATE=${INSTALLER_VM_TEMPLATE:-}
 
 CLUSTER_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
 KEYCLOAK_NS="keycloak"
-REALM_JSON="prerequisites/keycloak/service/files/realm.json"
+REALM_JSON="prerequisites/keycloak/files/realm.json"
 FC_CLIENT=${FC_CLIENT:-"osac-controller"}
 
 echo "=== Refreshing OSAC after snapshot boot ==="
@@ -82,64 +82,34 @@ fi
 
 keycloak_sync() {
     echo "[1/9] Syncing Keycloak realm..."
-    NEW_HASH=$(md5sum "${REALM_JSON}" | awk '{print $1}')
-    OLD_HASH=$(oc get configmap keycloak-realm -n "${KEYCLOAK_NS}" -o jsonpath='{.data.realm\.json}' 2>/dev/null | md5sum | awk '{print $1}')
-    if [[ "${NEW_HASH}" != "${OLD_HASH}" ]]; then
-        echo "  ConfigMap changed (${OLD_HASH:0:8} -> ${NEW_HASH:0:8}), restarting Keycloak..."
-        oc create configmap keycloak-realm \
-            --from-file=realm.json="${REALM_JSON}" \
-            -n "${KEYCLOAK_NS}" --dry-run=client -o yaml | oc apply -f -
-        oc rollout restart deploy/keycloak-service -n "${KEYCLOAK_NS}"
-        oc rollout status deploy/keycloak-service -n "${KEYCLOAK_NS}" --timeout=300s
-    else
-        echo "  ConfigMap unchanged, skipping Keycloak restart"
-    fi
 
-    KC_URL="https://$(oc get route keycloak -n "${KEYCLOAK_NS}" -o jsonpath='{.spec.host}')"
-    retry_until 300 5 '[[ "$(curl -sk -o /dev/null -w %{http_code} '"${KC_URL}"'/realms/osac)" == "200" ]]' || {
-        echo "Timed out waiting for Keycloak"
+    # Re-import realm by deleting and re-applying the KeycloakRealmImport CR.
+    # The operator re-runs the import when a new CR is created.
+    oc delete keycloakrealmimport osac-realm-import -n "${KEYCLOAK_NS}" --ignore-not-found
+    jq -n --arg realm "$(cat "${REALM_JSON}")" '{
+        apiVersion: "k8s.keycloak.org/v2beta1",
+        kind: "KeycloakRealmImport",
+        metadata: {name: "osac-realm-import", namespace: "keycloak"},
+        spec: {keycloakCRName: "osac-keycloak", realm: ($realm | fromjson)}
+    }' | oc apply -f -
+
+    echo "  Waiting for Keycloak CR to be ready..."
+    retry_until 600 10 '[[ "$(oc get keycloak osac-keycloak -n '"${KEYCLOAK_NS}"' -o jsonpath='"'"'{.status.conditions[?(@.type=="Ready")].status}'"'"' 2>/dev/null)" == "True" ]]' || {
+        echo "Timed out waiting for Keycloak to be ready"
         exit 1
     }
-    KC_ADMIN_TOKEN=$(curl -sk "${KC_URL}/realms/master/protocol/openid-connect/token" \
-        -d "client_id=admin-cli" -d "username=admin" -d "password=admin" -d "grant_type=password" | jq -r '.access_token')
-    [[ -n "${KC_ADMIN_TOKEN}" && "${KC_ADMIN_TOKEN}" != "null" ]] || { echo "ERROR: Could not get Keycloak admin token" >&2; exit 1; }
 
-    echo "  Syncing clients and users via admin API..."
-    jq -c '.clients[] | select(.protocol == "openid-connect" and .publicClient != true and .bearerOnly != true)' "${REALM_JSON}" | while IFS= read -r CLIENT_JSON; do
-        CID=$(echo "${CLIENT_JSON}" | jq -r '.clientId')
-        CLIENT_UUID=$(echo "${CLIENT_JSON}" | jq -r '.id')
-        HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${KC_ADMIN_TOKEN}" "${KC_URL}/admin/realms/osac/clients/${CLIENT_UUID}")
-        if [[ "${HTTP_CODE}" == "200" ]]; then
-            curl -sk -X PUT -H "Authorization: Bearer ${KC_ADMIN_TOKEN}" -H "Content-Type: application/json" \
-                "${KC_URL}/admin/realms/osac/clients/${CLIENT_UUID}" -d "${CLIENT_JSON}" >/dev/null
-            echo "  Updated client: ${CID}"
-        else
-            curl -sk -X POST -H "Authorization: Bearer ${KC_ADMIN_TOKEN}" -H "Content-Type: application/json" \
-                "${KC_URL}/admin/realms/osac/clients" -d "${CLIENT_JSON}" >/dev/null
-            echo "  Created client: ${CID}"
-        fi
-    done
+    echo "  Waiting for realm import..."
+    retry_until 300 5 '[[ "$(oc get keycloakrealmimport osac-realm-import -n '"${KEYCLOAK_NS}"' -o jsonpath='"'"'{.status.conditions[?(@.type=="Done")].status}'"'"' 2>/dev/null)" == "True" ]]' || {
+        echo "Timed out waiting for realm import"
+        exit 1
+    }
 
-    jq -c '.users[]?' "${REALM_JSON}" | while IFS= read -r USER_JSON; do
-        USERNAME=$(echo "${USER_JSON}" | jq -r '.username')
-        USER_UUID=$(echo "${USER_JSON}" | jq -r '.id')
-        HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${KC_ADMIN_TOKEN}" "${KC_URL}/admin/realms/osac/users/${USER_UUID}")
-        if [[ "${HTTP_CODE}" == "200" ]]; then
-            curl -sk -X PUT -H "Authorization: Bearer ${KC_ADMIN_TOKEN}" -H "Content-Type: application/json" \
-                "${KC_URL}/admin/realms/osac/users/${USER_UUID}" -d "${USER_JSON}" >/dev/null
-            echo "  Updated user: ${USERNAME}"
-        else
-            curl -sk -X POST -H "Authorization: Bearer ${KC_ADMIN_TOKEN}" -H "Content-Type: application/json" \
-                "${KC_URL}/admin/realms/osac/users" -d "${USER_JSON}" >/dev/null
-            echo "  Created user: ${USERNAME}"
-        fi
-    done
+    oc delete job keycloak-set-passwords -n "${KEYCLOAK_NS}" --ignore-not-found
+    oc delete configmap keycloak-password-setup -n "${KEYCLOAK_NS}" --ignore-not-found
+    oc apply -f prerequisites/keycloak/password-setup-job.yaml -n "${KEYCLOAK_NS}"
+    oc wait --for=condition=Complete job/keycloak-set-passwords -n "${KEYCLOAK_NS}" --timeout=300s
 
-    if [[ -f prerequisites/keycloak/service/password-setup-job.yaml ]]; then
-        oc delete job keycloak-set-passwords -n "${KEYCLOAK_NS}" --ignore-not-found
-        oc apply -f prerequisites/keycloak/service/password-setup-job.yaml -n "${KEYCLOAK_NS}"
-        oc wait --for=condition=Complete job/keycloak-set-passwords -n "${KEYCLOAK_NS}" --timeout=300s
-    fi
     echo "[1/9] Keycloak sync complete"
 }
 

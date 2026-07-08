@@ -138,8 +138,7 @@ echo "Deleting namespace ${INSTALLER_NAMESPACE}..."
 timeout 30 oc delete namespace "${INSTALLER_NAMESPACE}" --ignore-not-found --wait=false
 
 echo "Deleting Keycloak resources..."
-oc kustomize prerequisites/keycloak/ | delete_manifests
-timeout 30 oc delete namespace keycloak --ignore-not-found --wait=false
+uninstall_operator keycloak keycloak-operator
 # Phase 3: Delete operator CRs while operators are still running
 #
 # Operators need to be alive to process finalizers on their CRs. If we kill the
