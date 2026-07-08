@@ -20,9 +20,12 @@ prerequisites/
 │   ├── kustomization.yaml
 │   └── cert-manager.yaml
 ├── keycloak/
-│   ├── kustomization.yaml
-│   ├── database/
-│   └── service/
+│   ├── operator.yaml               # OLM Subscription + OperatorGroup + Namespace
+│   ├── keycloak-instance.yaml      # Keycloak CR + Certificate + Route
+│   ├── password-setup-job.yaml     # Test user password setup Job
+│   ├── database/                   # PostgreSQL StatefulSet + certs
+│   └── files/
+│       └── realm.json              # OSAC realm definition
 ├── nfs-subdir-provisioner/
 │   ├── base/
 │   └── overlays/lab/
@@ -135,11 +138,32 @@ oc get clusterissuer default-ca
 
 Identity provider for OIDC authentication. Skip if using an external identity provider.
 
+Keycloak is deployed via the upstream Keycloak Operator (OLM-managed). The operator
+manages the Keycloak server lifecycle; realm configuration is imported via a
+`KeycloakRealmImport` CR.
+
 ```bash
-oc apply -k prerequisites/keycloak/
+# Install the Keycloak operator via OLM
+oc apply -f prerequisites/keycloak/operator.yaml
+
+# Wait for the operator CSV to appear and succeed
+until KC_CSV=$(oc get csv --no-headers -n keycloak 2>/dev/null \
+  | awk '/keycloak/ { print $1 }' | tail -1) && [[ -n "${KC_CSV}" ]]; do
+  sleep 10
+done
+oc wait csv/${KC_CSV} -n keycloak \
+  --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+
+# Deploy the database
+oc apply -k prerequisites/keycloak/database/
+
+# Deploy the Keycloak instance (Certificate + CR + Route)
+oc apply -f prerequisites/keycloak/keycloak-instance.yaml
 
 # Wait for Keycloak to be ready
-oc get pods -n keycloak
+oc wait keycloak/osac-keycloak -n keycloak \
+  --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True \
+  --timeout=600s
 ```
 
 #### Step 5: Red Hat AAP Operator

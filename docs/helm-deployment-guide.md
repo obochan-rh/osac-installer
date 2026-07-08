@@ -253,12 +253,32 @@ oc wait clusterissuer/default-ca --for=condition=Ready --timeout=300s
 
 ### 1.7 Keycloak
 
-Keycloak provides identity management (OAuth/OIDC) for OSAC. It includes its
-own PostgreSQL database.
+Keycloak provides identity management (OAuth/OIDC) for OSAC. It is deployed via
+the upstream Keycloak Operator (OLM-managed) and includes its own PostgreSQL
+database.
 
 ```bash
-oc apply -k prerequisites/keycloak/
-oc wait deployment/keycloak-service -n keycloak --for=condition=Available --timeout=600s
+# Install the Keycloak operator via OLM
+oc apply -f prerequisites/keycloak/operator.yaml
+
+# Wait for the operator CSV to appear and succeed
+until KC_CSV=$(oc get csv --no-headers -n keycloak 2>/dev/null \
+  | awk '/keycloak/ { print $1 }' | tail -1) && [[ -n "${KC_CSV}" ]]; do
+  sleep 10
+done
+oc wait csv/${KC_CSV} -n keycloak \
+  --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+
+# Deploy the database
+oc apply -k prerequisites/keycloak/database/
+
+# Deploy the Keycloak instance (Certificate + CR + Route)
+oc apply -f prerequisites/keycloak/keycloak-instance.yaml
+
+# Wait for Keycloak to be ready
+oc wait keycloak/osac-keycloak -n keycloak \
+  --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True \
+  --timeout=600s
 ```
 
 ### 1.8 AAP Operator
@@ -456,7 +476,7 @@ and the OPA authorization policy expects JWT username
 ```bash
 FC_CLIENT_SECRET=$(jq -r \
   '.clients[] | select(.clientId == "osac-controller") | .secret' \
-  prerequisites/keycloak/service/files/realm.json)
+  prerequisites/keycloak/files/realm.json)
 
 oc create secret generic fulfillment-controller-credentials \
   --from-literal=client-id=osac-controller \
@@ -997,7 +1017,7 @@ If it shows a different value, recreate the secret:
 ```bash
 FC_CLIENT_SECRET=$(jq -r \
   '.clients[] | select(.clientId == "osac-controller") | .secret' \
-  prerequisites/keycloak/service/files/realm.json)
+  prerequisites/keycloak/files/realm.json)
 
 oc create secret generic fulfillment-controller-credentials \
   --from-literal=client-id=osac-controller \

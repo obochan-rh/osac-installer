@@ -439,9 +439,13 @@ oc wait --for=condition=Available deployment/trust-manager -n cert-manager --tim
 # CA issuer
 oc apply -f prerequisites/ca-issuer.yaml
 
-# Keycloak
-oc apply -k prerequisites/keycloak/
-oc wait --for=condition=Available deployment/keycloak-service -n keycloak --timeout=600s
+# Keycloak operator
+oc apply -f prerequisites/keycloak/operator.yaml
+# Wait for operator CSV, then deploy database and instance:
+oc apply -k prerequisites/keycloak/database/
+oc apply -f prerequisites/keycloak/keycloak-instance.yaml
+oc wait keycloak/osac-keycloak -n keycloak \
+  --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True --timeout=600s
 
 # AAP operator
 oc apply -f prerequisites/aap-installation.yaml
@@ -578,8 +582,10 @@ $ oc apply -f prerequisites/trust-manager.yaml
 # Install CA issuer
 $ oc apply -f prerequisites/ca-issuer.yaml
 
-# Install Keycloak
-$ oc apply -k prerequisites/keycloak/
+# Install Keycloak operator and instance
+$ oc apply -f prerequisites/keycloak/operator.yaml
+$ oc apply -k prerequisites/keycloak/database/
+$ oc apply -f prerequisites/keycloak/keycloak-instance.yaml
 
 # Install AAP operator
 $ oc apply -f prerequisites/aap-installation.yaml

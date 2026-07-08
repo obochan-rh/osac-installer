@@ -15,10 +15,10 @@ The following components must be installed manually before applying this overlay
 
 ## Keycloak
 
-The Keycloak admin password is stored in the `keycloak-admin` secret in the `keycloak` namespace:
+The Keycloak admin credentials are stored in the `osac-keycloak-initial-admin` secret in the `keycloak` namespace:
 
 ```sh
-oc get secret keycloak-admin -n keycloak -o jsonpath='{.data.password}' | base64 -d
+oc get secret osac-keycloak-initial-admin -n keycloak -o jsonpath='{.data.password}' | base64 -d
 ```
 
 ## Manual secrets
@@ -31,7 +31,7 @@ oc create secret generic fulfillment-controller-credentials \
   --from-literal=client-secret=<client-secret>
 ```
 
-`client-secret` must match the secret configured for the `osac-controller` client in the Keycloak realm ([prerequisites/keycloak/service/files/realm.json](../../prerequisites/keycloak/service/files/realm.json)).
+`client-secret` must match the secret configured for the `osac-controller` client in the Keycloak realm ([prerequisites/keycloak/files/realm.json](../../prerequisites/keycloak/files/realm.json)).
 
 ## Deployment
 
