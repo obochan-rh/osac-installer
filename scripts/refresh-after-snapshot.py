@@ -50,7 +50,7 @@ class RefreshConfig:
     vm_template: str = ""
     cluster_template: str = ""
     keycloak_ns: str = "keycloak"
-    realm_json: str = "prerequisites/keycloak/service/files/realm.json"
+    realm_json: str = "prerequisites/keycloak/files/realm.json"
     aap_stale_ts: str = field(default="", init=False)
 
     @property
@@ -428,23 +428,55 @@ def pre_fix_cert_sans(config: RefreshConfig) -> None:
 
 
 def keycloak_sync(config: RefreshConfig) -> None:
-    """Re-apply Keycloak manifests and wait for the realm endpoint."""
-    print("  Re-applying Keycloak from scratch...")
-    oc("apply", "-k", "prerequisites/keycloak/")
-    oc("rollout", "status", "deploy/keycloak-service", "-n", config.keycloak_ns,
-       "--timeout=300s")
+    """Re-import the OSAC realm via KeycloakRealmImport CR and set test passwords."""
+    print("  Re-importing Keycloak realm...")
 
-    kc_host = oc("get", "route", "keycloak", "-n", config.keycloak_ns,
-                 "-o", "jsonpath={.spec.host}", capture=True).stdout.strip()
-    retry_until(
-        description="Keycloak realm responding",
-        timeout=300, interval=5,
-        condition=lambda: subprocess.run(
-            ["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-             f"https://{kc_host}/realms/osac"],
-            capture_output=True, text=True, check=False,
-        ).stdout.strip() == "200",
+    oc("delete", "keycloakrealmimport", "osac-realm-import",
+       "-n", config.keycloak_ns, "--ignore-not-found")
+
+    realm_text = (REPO_ROOT / config.realm_json).read_text()
+    realm_import_cr = json.dumps({
+        "apiVersion": "k8s.keycloak.org/v2beta1",
+        "kind": "KeycloakRealmImport",
+        "metadata": {"name": "osac-realm-import", "namespace": config.keycloak_ns},
+        "spec": {"keycloakCRName": "osac-keycloak", "realm": json.loads(realm_text)},
+    })
+    subprocess.run(
+        ["oc", "apply", "-f", "-"],
+        input=realm_import_cr, text=True, check=True, cwd=str(REPO_ROOT),
     )
+
+    print("  Waiting for Keycloak CR to be ready...")
+    retry_until(
+        description="Keycloak CR ready",
+        timeout=600, interval=10,
+        condition=lambda: oc(
+            "get", "keycloak", "osac-keycloak", "-n", config.keycloak_ns,
+            "-o", 'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
+            capture=True, check=False,
+        ).stdout.strip() == "True",
+    )
+
+    print("  Waiting for realm import...")
+    retry_until(
+        description="Keycloak realm import done",
+        timeout=300, interval=5,
+        condition=lambda: oc(
+            "get", "keycloakrealmimport", "osac-realm-import", "-n", config.keycloak_ns,
+            "-o", 'jsonpath={.status.conditions[?(@.type=="Done")].status}',
+            capture=True, check=False,
+        ).stdout.strip() == "True",
+    )
+
+    oc("delete", "job", "keycloak-set-passwords", "-n", config.keycloak_ns,
+       "--ignore-not-found")
+    oc("delete", "configmap", "keycloak-password-setup", "-n", config.keycloak_ns,
+       "--ignore-not-found")
+    oc("apply", "-f", "prerequisites/keycloak/password-setup-job.yaml",
+       "-n", config.keycloak_ns)
+    oc("wait", "--for=condition=Complete", "job/keycloak-set-passwords",
+       "-n", config.keycloak_ns, "--timeout=300s")
+
     print("  Keycloak ready")
 
 
