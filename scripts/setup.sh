@@ -230,7 +230,19 @@ else
 
     # 1. Install Keycloak operator via OLM
     echo "Installing Keycloak operator..."
-    retry_until 300 3 '[[ -n "$(oc get csv --no-headers -n keycloak | grep keycloak)" ]]' 'oc apply -f prerequisites/keycloak/operator.yaml || true' || {
+    oc apply -f prerequisites/keycloak/operator.yaml
+
+    # Approve the InstallPlan (installPlanApproval: Manual)
+    echo "Waiting for Keycloak InstallPlan..."
+    retry_until 120 5 '[[ -n "$(oc get installplan -n keycloak -o jsonpath='"'"'{.items[0].metadata.name}'"'"' 2>/dev/null)" ]]' || {
+        echo "Timed out waiting for Keycloak InstallPlan to be created"
+        exit 1
+    }
+    KC_IP=$(oc get installplan -n keycloak -o jsonpath='{.items[0].metadata.name}')
+    echo "Approving InstallPlan ${KC_IP}..."
+    oc patch installplan "${KC_IP}" -n keycloak --type=merge -p '{"spec":{"approved":true}}'
+
+    retry_until 300 5 '[[ -n "$(oc get csv --no-headers -n keycloak | grep keycloak)" ]]' || {
         echo "Timed out waiting for Keycloak CSV to exist"
         exit 1
     }
