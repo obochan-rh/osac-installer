@@ -251,7 +251,7 @@ else
 
     # 2. Deploy database
     echo "Deploying Keycloak database..."
-    oc apply -k prerequisites/keycloak/database/
+    oc apply -k prerequisites/keycloak/database/ -n keycloak
     retry_until 300 5 '[[ "$(oc get statefulset keycloak-database -n keycloak -o jsonpath='"'"'{.status.readyReplicas}'"'"' 2>/dev/null)" == "1" ]]' || {
         echo "Timed out waiting for Keycloak database to be ready"
         exit 1
@@ -266,7 +266,7 @@ else
 
     # 4. Deploy Keycloak instance (Certificate + CR + Route)
     echo "Deploying Keycloak instance..."
-    oc apply -f prerequisites/keycloak/keycloak-instance.yaml
+    oc apply -f prerequisites/keycloak/keycloak-instance.yaml -n keycloak
 
     # 5. Import OSAC realm via KeycloakRealmImport CR
     echo "Importing OSAC realm..."
