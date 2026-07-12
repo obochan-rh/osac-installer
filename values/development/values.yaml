@@ -38,7 +38,7 @@ service:
     caBundle:
       configMap: ca-bundle
   auth:
-    issuerUrl: https://keycloak.keycloak.svc.cluster.local/realms/osac
+    issuerUrl: https://osac-keycloak-service.keycloak.svc.cluster.local:8443/realms/osac
     emergencyServiceAccounts:
     - admin
     - osac-operator
@@ -54,7 +54,7 @@ service:
           param: client-secret
   idp:
     provider: keycloak
-    url: https://keycloak.keycloak.svc.cluster.local
+    url: https://osac-keycloak-service.keycloak.svc.cluster.local:8443
     credentials:
     - secret:
         name: fulfillment-controller-credentials
@@ -138,3 +138,9 @@ networkFulfillment:
     NETRIS_SITE_ID: "5"
     NETRIS_TENANT_ID: "1"
     NETRIS_TENANT_NAME: "Admin"
+
+bundledPostgres:
+  enabled: true
+  database:
+    name: service
+    user: service

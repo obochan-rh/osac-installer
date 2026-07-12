@@ -293,6 +293,20 @@ else
     oc apply -f prerequisites/keycloak/password-setup-job.yaml -n keycloak
 fi
 
+# Discover Keycloak service endpoint dynamically from the operator-managed CR.
+# The operator names the Service as <cr-name>-service, so we derive it from the
+# Keycloak CR rather than hardcoding. Falls back to values from the Helm chart.
+KC_CR_NAME=$(oc get keycloak -n "${KEYCLOAK_NS}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [[ -n "${KC_CR_NAME}" ]]; then
+    KC_SVC_NAME="${KC_CR_NAME}-service"
+    KC_SVC_PORT=$(oc get svc -n "${KEYCLOAK_NS}" "${KC_SVC_NAME}" \
+        -o jsonpath='{.spec.ports[?(@.name=="https")].port}' 2>/dev/null || echo "8443")
+    KEYCLOAK_BASE_URL="https://${KC_SVC_NAME}.${KEYCLOAK_NS}.svc.cluster.local:${KC_SVC_PORT}"
+    echo "Discovered Keycloak service: ${KEYCLOAK_BASE_URL}"
+else
+    echo "WARNING: Could not discover operator-managed Keycloak service, using values from ${VALUES_FILE}"
+fi
+
 # Apply AAP prerequisites and wait for it to be ready
 AAP_NS=""
 if oc get deployment automation-controller-operator-controller-manager -n aap &>/dev/null; then
@@ -412,11 +426,20 @@ if [[ "${DEPLOY_MODE}" == "helm" ]]; then
     EXTERNAL_HOSTNAME="fulfillment-api-${INSTALLER_NAMESPACE}.${CLUSTER_DOMAIN}"
     INTERNAL_HOSTNAME="fulfillment-internal-api-${INSTALLER_NAMESPACE}.${CLUSTER_DOMAIN}"
     helm dependency update charts/osac/
+    HELM_KC_OVERRIDES=()
+    if [[ -n "${KEYCLOAK_BASE_URL:-}" ]]; then
+        HELM_KC_OVERRIDES=(
+            --set "service.auth.issuerUrl=${KEYCLOAK_BASE_URL}/realms/osac"
+            --set "service.idp.url=${KEYCLOAK_BASE_URL}"
+        )
+    fi
+
     helm upgrade --install osac charts/osac/ \
         --namespace "${INSTALLER_NAMESPACE}" \
         --values "${VALUES_FILE}" \
         --set "service.externalHostname=${EXTERNAL_HOSTNAME}" \
         --set "service.internalHostname=${INTERNAL_HOSTNAME}" \
+        "${HELM_KC_OVERRIDES[@]}" \
         --timeout 40m \
         --wait
 else

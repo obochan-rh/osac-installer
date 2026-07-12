@@ -23,6 +23,8 @@ spec:
   dnsNames:
   - keycloak
   - keycloak.keycloak.svc.cluster.local
+  - osac-keycloak-service
+  - osac-keycloak-service.keycloak.svc.cluster.local
   secretName: keycloak-tls-cert
   privateKey:
     rotationPolicy: Always
@@ -48,7 +50,7 @@ spec:
   http:
     tlsSecret: keycloak-tls-cert
   hostname:
-    hostname: keycloak.keycloak.svc.cluster.local
+    hostname: osac-keycloak-service.keycloak.svc.cluster.local
   proxy:
     headers: xforwarded
 ---
