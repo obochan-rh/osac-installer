@@ -50,9 +50,31 @@ spec:
   http:
     tlsSecret: keycloak-tls-cert
   hostname:
-    hostname: osac-keycloak-service.keycloak.svc.cluster.local
+    hostname: keycloak.keycloak.svc.cluster.local
   proxy:
     headers: xforwarded
+---
+# Proxy Service that maps the standard HTTPS port (443) to the operator's
+# non-standard port (8443). This ensures the JWT issuer URL
+# (https://keycloak.keycloak.svc.cluster.local/realms/osac) is reachable
+# without specifying a port, matching the "iss" claim in issued tokens.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app: keycloak
+spec:
+  selector:
+    app: keycloak
+    app.kubernetes.io/instance: osac-keycloak
+    app.kubernetes.io/managed-by: keycloak-operator
+  ports:
+  - name: https
+    port: 443
+    targetPort: 8443
+    protocol: TCP
 ---
 apiVersion: route.openshift.io/v1
 kind: Route

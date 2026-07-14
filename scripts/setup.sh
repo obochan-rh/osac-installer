@@ -293,16 +293,22 @@ else
     oc apply -f prerequisites/keycloak/password-setup-job.yaml -n keycloak
 fi
 
-# Discover Keycloak service endpoint dynamically from the operator-managed CR.
-# The operator names the Service as <cr-name>-service, so we derive it from the
-# Keycloak CR rather than hardcoding. Falls back to values from the Helm chart.
+# Discover Keycloak endpoint from the operator-managed CR's hostname setting.
+# The Keycloak CR hostname is used as the JWT issuer ("iss" claim), so we read
+# it directly to ensure the fulfillment service trusts the correct issuer.
+# A proxy Service ("keycloak") maps port 443 → 8443 so the standard HTTPS
+# port works for both OAuth discovery and Admin API calls.
 KC_CR_NAME=$(oc get keycloak -n "${KEYCLOAK_NS}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [[ -n "${KC_CR_NAME}" ]]; then
-    KC_SVC_NAME="${KC_CR_NAME}-service"
-    KC_SVC_PORT=$(oc get svc -n "${KEYCLOAK_NS}" "${KC_SVC_NAME}" \
-        -o jsonpath='{.spec.ports[?(@.name=="https")].port}' 2>/dev/null || echo "8443")
-    KEYCLOAK_BASE_URL="https://${KC_SVC_NAME}.${KEYCLOAK_NS}.svc.cluster.local:${KC_SVC_PORT}"
-    echo "Discovered Keycloak service: ${KEYCLOAK_BASE_URL}"
+    KC_HOSTNAME=$(oc get keycloak "${KC_CR_NAME}" -n "${KEYCLOAK_NS}" \
+        -o jsonpath='{.spec.hostname.hostname}' 2>/dev/null || true)
+    if [[ -n "${KC_HOSTNAME}" ]]; then
+        KEYCLOAK_BASE_URL="https://${KC_HOSTNAME}"
+    else
+        KC_SVC_NAME="${KC_CR_NAME}-service"
+        KEYCLOAK_BASE_URL="https://${KC_SVC_NAME}.${KEYCLOAK_NS}.svc.cluster.local"
+    fi
+    echo "Discovered Keycloak endpoint: ${KEYCLOAK_BASE_URL}"
 else
     echo "WARNING: Could not discover operator-managed Keycloak service, using values from ${VALUES_FILE}"
 fi
