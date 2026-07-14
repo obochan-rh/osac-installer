@@ -139,6 +139,9 @@ networkFulfillment:
     NETRIS_TENANT_ID: "1"
     NETRIS_TENANT_NAME: "Admin"
 
+bmf:
+  enabled: false
+
 bundledPostgres:
   enabled: true
   database:
